@@ -7,6 +7,65 @@ from ctypes import *
 from skiplistcollections import SkipListDict
 
 
+class Column:
+    def __init__(self):
+        class Property:
+            def __get__(prop, instance, owner):
+                return self.get(instance)
+
+            def __set__(prop, instance, value):
+                instance._dirty = True
+                return self.set(instance, value)
+
+        self.Property = Property
+
+    def __set_name__(self, owner, name):
+        self.name = name
+        self.table = owner
+
+    def get(self, row):
+        return getattr(row, '_' + self.name)
+
+    def set(self, row, value):
+        indices = [index for index in row.table.indices if self.name in index.keys]
+        if row._loaded:
+            for index in indices:
+                index.remove(row)
+        setattr(row, '_' + self.name, value)
+        if row._loaded:
+            for index in indices:
+                index.add(row)
+
+    def __eq__(self, other):
+        return ColEq(self, other)
+
+    def __lt__(self, other):
+        return ColLt(self, other)
+
+    def __gt__(self, other):
+        return ColGt(self, other)
+
+    def load(self, row):
+        pass
+
+    def dump(self):
+        pass
+
+
+class StructColumn(Column):
+    def get(self, row):
+        return getattr(row, '__' + self.name).value
+
+    def set(self, row, value):
+        getattr(row, '__' + self.name).value = value
+        return super().set(row, value)
+
+
+class IntColumn(StructColumn):
+    class Struct(LittleEndianStructure):
+        _fields_ = [('value', c_int)]
+
+
 class Index:
     def __init__(self, *keys):
         self.keys = keys
@@ -29,15 +88,21 @@ class Database:
     path = None
 
     class Table:
+        id = IntColumn()
+
         def __init_subclass__(cls, **kwargs):
             cls.rows = []
             cls.db.tables.append(cls)
             cls.columns = []
-            fields = [("id", c_uint32)]
             for name, column in cls.__dict__.items():
                 if not isinstance(column, Column):
                     continue
                 cls.columns.append(column)
+            cls.id = IntColumn()
+            cls.id.__set_name__(cls, 'id')
+            cls.columns.insert(0, cls.id)
+            fields = []
+            for column in cls.columns:
                 fields.append(('__' + column.name, column.Struct))
 
             class Row(LittleEndianStructure):
@@ -54,17 +119,22 @@ class Database:
                 def _dirty(self, value):
                     if value == self.__dirty:
                         return
-                    cls._dirty_index.remove(self)
+                    if self._loaded:
+                        cls._dirty_index.remove(self)
                     self.__dirty = value
-                    cls._dirty_index.add(self)
+                    if self._loaded:
+                        cls._dirty_index.add(self)
 
                 def __init__(self):
+                    super().__init__()
+                    self._loaded = False
                     cls.max_id += 1
                     self.id = cls.max_id
                     self.table.rows.append(self)
                     self._offset = self.table.max('_offset', -1) + 1
                     for index in self.table.indices:
                         index.add(self)
+                    self._loaded = True
                     self._dirty = True
 
                 def destroy(self):
@@ -81,6 +151,9 @@ class Database:
                             offset_index.add(max)
                     except StopIteration:
                         pass
+
+                def __repr__(self):
+                    return '< {}: ' + ' '.join('{}: {},'.format(i.name, i.get(self)) for i in cls.columns) + ' >'
 
             for column in cls.columns:
                 setattr(Row, column.name, column.Property())
@@ -115,7 +188,10 @@ class Database:
         @classmethod
         def save(cls, path):
             path = path.joinpath(cls.__name__ + '.tbl')
-            file = open(path, 'r+b')
+            try:
+                file = open(path, 'r+b')
+            except FileNotFoundError:
+                file = open(path, 'w+b')
             size = sizeof(cls.Row)
             dirty = [i for i in cls._dirty_index.find((True,))]
             for row in dirty:
@@ -126,7 +202,7 @@ class Database:
             file.truncate(highest_offset * size)
 
         @classmethod
-        def find_index(cls, keys):
+        def find_index(cls, keys, cmpkeys = []):
             match = -1
             best_index = None
             for index in cls.indices:
@@ -134,12 +210,52 @@ class Database:
                 for key in index.keys:
                     if key in keys:
                         strength += 1
+                    elif key in cmpkeys:
+                        strength += 1
+                        break
                     else:
                         break
                 if strength > match:
                     match = strength
                     best_index = index
             return best_index
+
+        @classmethod
+        def where(cls, *comparisons):
+            eq = [i for i in comparisons if isinstance(i, ColEq)]
+            cmp = [i for i in comparisons if not isinstance(i, ColEq)]
+            eq_names = {i.col.name:i for i in eq}
+            cmp_names = {i.col.name:i for i in cmp}
+            index = cls.find_index(eq_names, cmp_names)
+            reverse = False
+            start = []
+            matches = []
+            for key in index.keys:
+                if key in eq_names:
+                    comp = eq_names[key]
+                    start.append(comp.value)
+                    matches.append(comp.key)
+                elif key in cmp_names:
+                    comp = cmp_names[key]
+                    start.append(comp.value)
+                    if isinstance(comp, ColLt):
+                        reverse = True
+                    break
+                else:
+                    break
+
+            if len(index.keys) == 1:
+                if start:
+                    start = start[0]
+                else:
+                    start = None
+            else:
+                start = tuple(start)
+            for entry in index.find(start, reverse):
+                if not all(i.match(entry) for i in matches):
+                    break
+                if all(i.match(entry) for i in comparisons):
+                    yield entry
 
         @classmethod
         def max(cls, key, default=None):
@@ -165,58 +281,32 @@ class Database:
             table.save(self.path)
 
 
-class Column:
-    def __init__(self):
-        class Property:
-            def __get__(prop, instance, owner):
-                return self.get(instance)
-
-            def __set__(prop, instance, value):
-                instance._dirty = True
-                return self.set(instance, value)
-
-        self.Property = Property
-
-    def __set_name__(self, owner, name):
-        self.name = name
-        self.table = owner
-
-    def get(self, row):
-        return getattr(row, '_' + self.name)
-
-    def set(self, row, value):
-        indices = [index for index in row.table.indices if self.name in index.keys]
-        for index in indices:
-            index.remove(row)
-        setattr(row, '_' + self.name, value)
-        for index in indices:
-            index.add(row)
-
-    def load(self, row):
-        pass
-
-    def dump(self):
-        pass
+class ColCmp:
+    def __init__(self, col, value):
+        self.key = col.name
+        self.col = col
+        self.value = value
 
 
-class StructColumn(Column):
-    def get(self, row):
-        return getattr(row, '__' + self.name).value
-
-    def set(self, row, value):
-        getattr(row, '__' + self.name).value = value
-        return super().set(row, value)
+class ColEq(ColCmp):
+    def match(self, row):
+        return self.col.get(row) == self.value
 
 
-class IntColumn(StructColumn):
-    class Struct(LittleEndianStructure):
-        _fields_ = [('value', c_int)]
+class ColGt(ColCmp):
+    def match(self, row):
+        return self.col.get(row) > self.value
+
+
+class ColLt(ColCmp):
+    def match(self, row):
+        return self.col.get(row) < self.value
 
 
 class StrColumn(Column):
     def __init__(self, length):
         class Struct(LittleEndianStructure):
-            _fields_ = [('length', c_uint32), (('data'), c_ubyte * length)]
+            _fields_ = [('length', c_uint32), ('data', c_ubyte * length)]
 
         self.length = length
         self.Struct = Struct
@@ -255,6 +345,9 @@ class TestTable(db.Table):
 
 
 db.connect('test_database')
-row = TestTable.rows[0]
+row = TestTable.Row()
 print(row.id)
+row.str = str(row.id)
+results = [i for i in TestTable.where(TestTable.num < 2)]
+print(results)
 db.save()
