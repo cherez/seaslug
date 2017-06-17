@@ -1,17 +1,38 @@
+import operator
 import os
 import pathlib
 import io
 
 from ctypes import *
+from skiplistcollections import SkipListDict
+
+class Index:
+    def __init__(self, *keys):
+        self.keys = keys
+        self.keyer = operator.attrgetter(*keys)
+        self.list = SkipListDict()
+
+    def add(self, object):
+        key = self.keyer(object)
+        self.list[key] = object
+
+    def remove(self, object):
+        key = self.keyer(object)
+        del self.list[key]
+
+    def find(self, start, reverse=False):
+        return self.list.values(start, reverse)
 
 
 class Database:
+    path = None
+
     class Table:
         def __init_subclass__(cls, **kwargs):
             cls.rows = []
             cls.db.tables.append(cls)
             cls.columns = []
-            fields = [("id", c_int)]
+            fields = [("id", c_uint32)]
             for name, column in cls.__dict__.items():
                 if not isinstance(column, Column):
                     continue
@@ -32,6 +53,8 @@ class Database:
             cls.Row = Row
             cls.max_id = -1
 
+            cls.indices = [Index('id')]
+
         @classmethod
         def load(cls, path):
             path = path.joinpath(cls.__name__ + '.tbl')
@@ -40,11 +63,16 @@ class Database:
             except IOError:
                 cls.rows = []
                 return
+            offset = 0
             while file.peek():
                 row = cls.Row()
                 file.readinto(row)
+                row._offset = offset
+                offset += 1
                 for column in cls.columns:
                     column.load(row)
+                for index in cls.indices:
+                    index.add(row)
             cls.max_id = max((i.id for i in cls.rows), default=0)
 
         @classmethod
@@ -70,16 +98,15 @@ class Database:
 
 
 class Column:
-    class Property:
-        def __get__(self, instance, owner):
-            return self.column.get(instance)
-
-        def __set__(self, instance, value):
-            instance._dirty = True
-            return self.column.set(instance, value)
-
     def __init__(self):
-        self.Property.column = self
+        class Property:
+            def __get__(prop, instance, owner):
+                return self.get(instance)
+
+            def __set__(prop, instance, value):
+                instance._dirty = True
+                return self.set(instance, value)
+        self.Property = Property
 
     def __set_name__(self, owner, name):
         self.name = name
@@ -89,7 +116,12 @@ class Column:
         return getattr(row, '_' + self.name)
 
     def set(self, row, value):
-        return setattr(row, '_' + self.name, value)
+        indices = [index for index in row.table.indices if self.name in index.keys]
+        for index in indices:
+            index.remove(row)
+        setattr(row, '_' + self.name, value)
+        for index in indices:
+            index.add(row)
 
     def load(self, row):
         pass
@@ -104,7 +136,7 @@ class StructColumn(Column):
 
     def set(self, row, value):
         getattr(row, '__' + self.name).value = value
-        return value
+        return super().set(row, value)
 
 
 class IntColumn(StructColumn):
@@ -115,7 +147,7 @@ class IntColumn(StructColumn):
 class StrColumn(Column):
     def __init__(self, length):
         class Struct(LittleEndianStructure):
-            _fields_ = [('length', c_int), (('data'), c_ubyte * length)]
+            _fields_ = [('length', c_uint32), (('data'), c_ubyte * length)]
 
         self.length = length
         self.Struct = Struct
@@ -134,7 +166,7 @@ class StrColumn(Column):
         b.getbuffer()[offset:offset + length] = encoded
         b.seek(0)
         b.readinto(struct)
-        return setattr(row, '_' + self.name, value)
+        return super().set(row, value)
 
     def load(self, row):
         b = io.BytesIO()
