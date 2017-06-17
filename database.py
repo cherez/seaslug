@@ -45,6 +45,12 @@ class Column:
     def __gt__(self, other):
         return ColGt(self, other)
 
+    def __le__(self, other):
+        return ColLe(self, other)
+
+    def __ge__(self, other):
+        return ColGe(self, other)
+
     def load(self, row):
         pass
 
@@ -159,8 +165,10 @@ class Database:
                 setattr(Row, column.name, column.Property())
             cls.Row = Row
             cls.max_id = -1
-
+            indices = cls.indices
             cls.indices = [Index('id'), Index('_offset', 'id'), Index('_dirty', 'id')]
+            for index in indices:
+                cls.indices.append(Index(*index, 'id'))
 
             cls._dirty_index = cls.find_index('_dirty')
 
@@ -237,9 +245,10 @@ class Database:
                     matches.append(comp.key)
                 elif key in cmp_names:
                     comp = cmp_names[key]
-                    start.append(comp.value)
-                    if isinstance(comp, ColLt):
-                        reverse = True
+                    if isinstance(comp, (ColLt, ColLe)):
+                        matches.append(comp)
+                    else:
+                        start.append(comp.value)
                     break
                 else:
                     break
@@ -302,6 +311,15 @@ class ColLt(ColCmp):
     def match(self, row):
         return self.col.get(row) < self.value
 
+class ColGe(ColCmp):
+    def match(self, row):
+        return self.col.get(row) >= self.value
+
+
+class ColLe(ColCmp):
+    def match(self, row):
+        return self.col.get(row) <= self.value
+
 
 class StrColumn(Column):
     def __init__(self, length):
@@ -343,11 +361,16 @@ class TestTable(db.Table):
     num = IntColumn()
     str = StrColumn(255)
 
+    indices = [
+        ['num']
+    ]
+
 
 db.connect('test_database')
 row = TestTable.Row()
 print(row.id)
 row.str = str(row.id)
-results = [i for i in TestTable.where(TestTable.num < 2)]
+results = [i for i in TestTable.where(TestTable.id <= 2)]
+print(len(results))
 print(results)
 db.save()
