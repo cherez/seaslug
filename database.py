@@ -2,6 +2,7 @@ import operator
 import os
 import pathlib
 import io
+import pickle
 
 from ctypes import *
 from skiplistcollections import SkipListDict
@@ -107,6 +108,7 @@ class Database:
     path = None
 
     class Table:
+        full_dump_needed = False
         id = IntColumn()
 
         def __init_subclass__(cls, **kwargs):
@@ -185,13 +187,20 @@ class Database:
 
             cls._dirty_index = cls.find_index('_dirty')
 
+            cls.col_dump = pickle.dumps(cls.columns)
+
         @classmethod
-        def load(cls, path):
-            path = path.joinpath(cls.__name__ + '.tbl')
+        def load(cls, dir):
+            path = dir.joinpath(cls.__name__ + '.tbl')
             try:
                 file = open(path, 'rb')
             except IOError:
                 cls.rows = []
+                return
+            schema_len = int.from_bytes(file.read(4), byteorder='little')
+            schema = file.read(schema_len)
+            if schema != cls.col_dump:
+                cls.import_data(dir, schema)
                 return
             offset = 0
             while file.peek():
@@ -207,20 +216,53 @@ class Database:
             cls.max_id = max((i.id for i in cls.rows), default=0)
 
         @classmethod
+        def import_data(cls, path, schema):
+            columns = pickle.loads(schema)
+            d = {column.name: column for column in columns}
+            del d['id']
+            copy = type(cls.__name__, cls.__bases__, d)
+            cls.db.tables.remove(copy)
+            copy.load(path)
+            their_columns = set(d.keys())
+            their_columns.add('id')
+            for row in copy.rows:
+                ours = cls.Row()
+                for column in cls.columns:
+                    if column.name in their_columns:
+                        setattr(ours, column.name, getattr(row, column.name))
+                    column.load(ours)
+            cls.full_dump_needed = True
+
+        @classmethod
         def save(cls, path):
             path = path.joinpath(cls.__name__ + '.tbl')
+            if cls.full_dump_needed:
+                return cls.save_all(path)
             try:
                 file = open(path, 'r+b')
             except FileNotFoundError:
-                file = open(path, 'w+b')
+                return cls.save_all(path)
             size = sizeof(cls.Row)
             dirty = [i for i in cls._dirty_index.find((True,))]
+            header_offset = len(cls.col_dump) + 4
             for row in dirty:
-                file.seek(row._offset * size)
+                file.seek(row._offset * size + header_offset)
                 file.write(row)
                 row._dirty = False
             highest_offset = cls.max('_offset', -1) + 1
-            file.truncate(highest_offset * size)
+            file.truncate(highest_offset * size + header_offset)
+
+        @classmethod
+        def save_all(cls, path):
+            file = open(path, 'w+b')
+            length = len(cls.col_dump)
+            file.write(length.to_bytes(4, byteorder='little'))
+            file.write(cls.col_dump)
+            ordered = [i for i in cls.find_index('_offset').find(None)]
+            for row in ordered:
+                file.write(row)
+                row._dirty = False
+            cls.full_dump_needed = False
 
         @classmethod
         def find_index(cls, keys, cmpkeys=[]):
@@ -366,37 +408,3 @@ class StrColumn(Column):
         buffer = b.getvalue()[4:4 + length]
         string = buffer.decode()
         setattr(row, '_' + self.name, string)
-
-
-db = Database()
-
-
-class TestTable(db.Table):
-    num = IntColumn()
-    str = StrColumn(255)
-
-    indices = [
-        ['num']
-    ]
-
-
-class NumTable(db.Table):
-    num = IntColumn()
-
-
-db.connect('test_database')
-row = TestTable.Row()
-print(row.id)
-row.str = str(row.id)
-results = [i for i in TestTable.where(TestTable.id <= 2)]
-print(len(results))
-print(results)
-# db.save()
-
-import pickle
-
-dump = pickle.dumps(TestTable.columns)
-print(dump)
-columns = pickle.loads(dump)
-print(columns[0].Property)
-print(columns == TestTable.columns)
