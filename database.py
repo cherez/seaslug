@@ -5,10 +5,14 @@ import io
 import pickle
 
 from ctypes import *
+from ctypes import LittleEndianStructure, c_uint32, c_ubyte
+
+import collections
+from functools import total_ordering
 from skiplistcollections import SkipListDict
 
 
-class Column:
+class VColumn:
     def __init__(self, *args, **kwargs):
         class Property:
             def __get__(prop, instance, owner):
@@ -19,25 +23,10 @@ class Column:
                 return self.set(instance, value)
 
         self.Property = Property
-        self.args = args
-        self.kwargs = kwargs
 
     def __set_name__(self, owner, name):
         self.name = name
         self.table = owner
-
-    def get(self, row):
-        return getattr(row, '_' + self.name)
-
-    def set(self, row, value):
-        indices = [index for index in row.table.indices if self.name in index.keys]
-        if row._loaded:
-            for index in indices:
-                index.remove(row)
-        setattr(row, '_' + self.name, value)
-        if row._loaded:
-            for index in indices:
-                index.add(row)
 
     def __eq__(self, other):
         return ColEq(self, other)
@@ -53,6 +42,32 @@ class Column:
 
     def __ge__(self, other):
         return ColGe(self, other)
+
+    def get(self, row):
+        raise NotImplementedError()
+
+    def set(self, row, value):
+        raise NotImplementedError()
+
+
+class Column(VColumn):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        super().__init__(*args, **kwargs)
+
+    def get(self, row):
+        return getattr(row, '_' + self.name)
+
+    def set(self, row, value):
+        indices = [index for index in row.table.indices if self.name in index.keys]
+        if row._loaded:
+            for index in indices:
+                index.remove(row)
+        setattr(row, '_' + self.name, value)
+        if row._loaded:
+            for index in indices:
+                index.add(row)
 
     def load(self, row):
         pass
@@ -77,8 +92,14 @@ class StructColumn(Column):
         return getattr(row, '__' + self.name).value
 
     def set(self, row, value):
+        indices = [index for index in row.table.indices if self.name in index.keys]
+        if row._loaded:
+            for index in indices:
+                index.remove(row)
         getattr(row, '__' + self.name).value = value
-        return super().set(row, value)
+        if row._loaded:
+            for index in indices:
+                index.add(row)
 
 
 class IntColumn(StructColumn):
@@ -86,11 +107,55 @@ class IntColumn(StructColumn):
         _fields_ = [('value', c_int)]
 
 
+class RemoteColumn(VColumn):
+    def __init__(self, remote):
+        if not isinstance(remote, str):
+            self._table = remote
+            remote = remote.__name__
+        else:
+            self.table = None
+        self.remote = remote
+        self._table = None
+        super().__init__(remote)
+
+    def get_table(self, row):
+        for table in row.table.db.tables:
+            if table.__name__ == self.remote:
+                self._table = table
+                break
+        return self._table
+
+
+class ForeignColumn(StructColumn, RemoteColumn):
+    class Struct(LittleEndianStructure):
+        _fields_ = [('value', c_int)]
+
+    def get(self, row):
+        if not self._table:
+            self.get_table(row)
+
+        id = getattr(row, '__' + self.name).value
+        return self._table.find(self._table.id == id)
+
+    def set(self, row, value):
+        if value is None:
+            value = 0
+        else:
+            value = value.id
+        return super().set(row, value)
+
+
 class Index:
     def __init__(self, *keys):
         self.keys = keys
         self.keyer = operator.attrgetter(*keys)
         self.list = SkipListDict()
+
+    def reindex(self):
+        rows = [i for i in self.list.values()]
+        self.list = SkipListDict()
+        for i in rows:
+            self.add(i)
 
     def add(self, object):
         key = self.keyer(object)
@@ -115,10 +180,12 @@ class Database:
             cls.rows = []
             cls.db.tables.append(cls)
             cls.columns = []
+            cls.vcolumns = []
             for name, column in cls.__dict__.items():
-                if not isinstance(column, Column):
-                    continue
-                cls.columns.append(column)
+                if isinstance(column, Column):
+                    cls.columns.append(column)
+                elif isinstance(column, VColumn):
+                    cls.vcolumns.append(column)
             cls.id = IntColumn()
             cls.id.__set_name__(cls, 'id')
             cls.columns.insert(0, cls.id)
@@ -126,6 +193,7 @@ class Database:
             for column in cls.columns:
                 fields.append(('__' + column.name, column.Struct))
 
+            @total_ordering
             class Row(LittleEndianStructure):
                 _fields_ = fields
                 table = cls
@@ -173,13 +241,19 @@ class Database:
                     except StopIteration:
                         pass
 
-                def __repr__(self):
-                    return '< {}: ' + ' '.join('{}: {},'.format(i.name, i.get(self)) for i in cls.columns) + ' >'
+                def __eq__(self, other):
+                    return self is other
 
-            for column in cls.columns:
+                def __lt__(self, other):
+                    if other is None:
+                        return False
+                    else:
+                        return self.id < other.id
+
+            for column in cls.columns + cls.vcolumns:
                 setattr(Row, column.name, column.Property())
             cls.Row = Row
-            cls.max_id = -1
+            cls.max_id = 0
             indices = getattr(cls, 'indices', [])
             cls.indices = [Index('id'), Index('_offset', 'id'), Index('_dirty', 'id')]
             for index in indices:
@@ -297,7 +371,7 @@ class Database:
                 if key in eq_names:
                     comp = eq_names[key]
                     start.append(comp.value)
-                    matches.append(comp.key)
+                    matches.append(comp)
                 elif key in cmp_names:
                     comp = cmp_names[key]
                     if isinstance(comp, (ColLt, ColLe)):
@@ -322,6 +396,17 @@ class Database:
                     yield entry
 
         @classmethod
+        def find(cls, *comparisons):
+            for i in cls.where(*comparisons):
+                return i
+            return None
+
+        @classmethod
+        def reindex(cls):
+            for index in cls.indices:
+                index.reindex()
+
+        @classmethod
         def max(cls, key, default=None):
             try:
                 index = cls.find_index(key)
@@ -339,6 +424,8 @@ class Database:
         os.makedirs(self.path, exist_ok=True)
         for table in self.tables:
             table.load(self.path)
+        for table in self.tables:
+            table.reindex()
 
     def save(self):
         for table in self.tables:
@@ -377,18 +464,17 @@ class ColLe(ColCmp):
         return self.col.get(row) <= self.value
 
 
-class StrColumn(Column):
-    def __init__(self, length):
+class BytesColumn(Column):
+    def __init__(self, length, *args, **kwargs):
         class Struct(LittleEndianStructure):
             _fields_ = [('length', c_uint32), ('data', c_ubyte * length)]
 
         self.length = length
         self.Struct = Struct
-        super().__init__(length)
+        super().__init__(length, *args, **kwargs)
 
     def set(self, row, value):
-        encoded = value.encode()
-        length = len(encoded)
+        length = len(value)
         if length > self.length:
             raise ValueError("Received string of {} bytes, maximum {}".format(length, self.length))
         struct = getattr(row, '__' + self.name)
@@ -396,7 +482,7 @@ class StrColumn(Column):
         b = io.BytesIO()
         b.write(struct)
         offset = self.Struct.data.offset
-        b.getbuffer()[offset:offset + length] = encoded
+        b.getbuffer()[offset:offset + length] = value
         b.seek(0)
         b.readinto(struct)
         return super().set(row, value)
@@ -406,5 +492,62 @@ class StrColumn(Column):
         length = getattr(row, '__' + self.name).length
         b.write(getattr(row, '__' + self.name))
         buffer = b.getvalue()[4:4 + length]
-        string = buffer.decode()
+        setattr(row, '_' + self.name, buffer)
+
+
+class StrColumn(BytesColumn):
+    def set(self, row, value):
+        super().set(row, value.encode())
+        setattr(row, '_' + self.name, value)
+
+    def load(self, row):
+        super().load(row)
+        string = getattr(row, '_' + self.name).decode()
         setattr(row, '_' + self.name, string)
+
+
+class PickleColumn(BytesColumn):
+    def __init__(self, length=64, type=None):
+        self.type = type
+        super().__init__(length, type)
+
+    def set(self, row, value):
+        if self.type and not isinstance(value, self.type):
+            raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
+        super().set(row, pickle.dumps(value))
+        setattr(row, '_' + self.name, value)
+
+    def load(self, row):
+        super().load(row)
+        value = pickle.loads(getattr(row, '_' + self.name))
+        if self.type and not isinstance(value, self.type):
+            raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
+        setattr(row, '_' + self.name, value)
+
+
+class Through(VColumn):
+    def __init__(self, *chain):
+        self.chain = chain
+        super().__init__()
+
+    def get(self, row):
+        target = row
+        for next in self.chain:
+            if isinstance(target, collections.Iterable):
+                target = (getattr(i, next) for i in target)
+            else:
+                target = getattr(target, next)
+        return target
+
+
+class Belongs(RemoteColumn, VColumn):
+    def __init__(self, remote, key):
+        self.key = key
+        super().__init__(remote)
+
+    def get(self, row):
+        if not self._table:
+            self.get_table(row)
+
+        key = getattr(self._table, self.key)
+        return self._table.where(key == row)
