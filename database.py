@@ -8,7 +8,7 @@ from skiplistcollections import SkipListDict
 
 
 class Column:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         class Property:
             def __get__(prop, instance, owner):
                 return self.get(instance)
@@ -18,6 +18,8 @@ class Column:
                 return self.set(instance, value)
 
         self.Property = Property
+        self.args = args
+        self.kwargs = kwargs
 
     def __set_name__(self, owner, name):
         self.name = name
@@ -56,6 +58,17 @@ class Column:
 
     def dump(self):
         pass
+
+    def __getstate__(self):
+        return {
+            'args': self.args,
+            'kwargs': self.kwargs,
+            'name': self.name
+        }
+
+    def __setstate__(self, state):
+        self.__init__(*state['args'], **state['kwargs'])
+        self.name = state['name']
 
 
 class StructColumn(Column):
@@ -165,7 +178,7 @@ class Database:
                 setattr(Row, column.name, column.Property())
             cls.Row = Row
             cls.max_id = -1
-            indices = cls.indices
+            indices = getattr(cls, 'indices', [])
             cls.indices = [Index('id'), Index('_offset', 'id'), Index('_dirty', 'id')]
             for index in indices:
                 cls.indices.append(Index(*index, 'id'))
@@ -210,7 +223,7 @@ class Database:
             file.truncate(highest_offset * size)
 
         @classmethod
-        def find_index(cls, keys, cmpkeys = []):
+        def find_index(cls, keys, cmpkeys=[]):
             match = -1
             best_index = None
             for index in cls.indices:
@@ -232,8 +245,8 @@ class Database:
         def where(cls, *comparisons):
             eq = [i for i in comparisons if isinstance(i, ColEq)]
             cmp = [i for i in comparisons if not isinstance(i, ColEq)]
-            eq_names = {i.col.name:i for i in eq}
-            cmp_names = {i.col.name:i for i in cmp}
+            eq_names = {i.col.name: i for i in eq}
+            cmp_names = {i.col.name: i for i in cmp}
             index = cls.find_index(eq_names, cmp_names)
             reverse = False
             start = []
@@ -311,6 +324,7 @@ class ColLt(ColCmp):
     def match(self, row):
         return self.col.get(row) < self.value
 
+
 class ColGe(ColCmp):
     def match(self, row):
         return self.col.get(row) >= self.value
@@ -328,7 +342,7 @@ class StrColumn(Column):
 
         self.length = length
         self.Struct = Struct
-        super().__init__()
+        super().__init__(length)
 
     def set(self, row, value):
         encoded = value.encode()
@@ -366,6 +380,10 @@ class TestTable(db.Table):
     ]
 
 
+class NumTable(db.Table):
+    num = IntColumn()
+
+
 db.connect('test_database')
 row = TestTable.Row()
 print(row.id)
@@ -373,4 +391,12 @@ row.str = str(row.id)
 results = [i for i in TestTable.where(TestTable.id <= 2)]
 print(len(results))
 print(results)
-db.save()
+# db.save()
+
+import pickle
+
+dump = pickle.dumps(TestTable.columns)
+print(dump)
+columns = pickle.loads(dump)
+print(columns[0].Property)
+print(columns == TestTable.columns)
