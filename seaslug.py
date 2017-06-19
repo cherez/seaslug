@@ -5,7 +5,7 @@ import io
 import pickle
 
 from ctypes import *
-from ctypes import LittleEndianStructure, c_uint32, c_ubyte
+from ctypes import LittleEndianStructure, c_uint32, c_ubyte, c_bool
 
 import collections
 from functools import total_ordering
@@ -136,6 +136,11 @@ class IntColumn(StructColumn):
         _fields_ = [('value', c_int)]
 
 
+class BoolColumn(StructColumn):
+    class Struct(LittleEndianStructure):
+        _fields_ = [('value', c_bool)]
+
+
 # Abstract base class for a column that references
 class RemoteColumn(VColumn):
     def __init__(self, remote, *args):
@@ -189,7 +194,7 @@ class BytesColumn(Column):
         self.Struct = Struct
         super().__init__(length, *args, **kwargs)
 
-    def set(self, row, value):
+    def store_bytes(self, row, value):
         length = len(value)
         if length > self.length:
             raise ValueError("Received string of {} bytes, maximum {}".format(length, self.length))
@@ -207,7 +212,6 @@ class BytesColumn(Column):
         # and copy it back into the struct
         b.seek(0)
         b.readinto(struct)
-        return super().set(row, value)
 
     def load(self, row):
         # copy the bytes out of the struct
@@ -215,19 +219,18 @@ class BytesColumn(Column):
         length = getattr(row, '__' + self.name).length
         b.write(getattr(row, '__' + self.name))
         buffer = b.getvalue()[4:4 + length]
-        setattr(row, '_' + self.name, buffer)
         return buffer
 
 
 # A column encoded a unicode string
 class StrColumn(BytesColumn):
     def set(self, row, value):
-        super().set(row, value.encode())
-        setattr(row, '_' + self.name, value)
+        self.store_bytes(row, value.encode())
+        super().set(row, value)
 
     def load(self, row):
-        super().load(row)
-        string = getattr(row, '_' + self.name).decode()
+        buffer = super().load(row)
+        string = buffer.decode()
         setattr(row, '_' + self.name, string)
 
 
@@ -238,15 +241,18 @@ class PickleColumn(BytesColumn):
         super().__init__(length, type)
 
     def set(self, row, value):
-        if self.type and not isinstance(value, self.type):
+        if value is not None and self.type and not isinstance(value, self.type):
             raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
-        super().set(row, pickle.dumps(value))
-        setattr(row, '_' + self.name, value)
+        self.store_bytes(row, pickle.dumps(value, 4))
+        super().set(row, value)
 
     def load(self, row):
-        super().load(row)
-        value = pickle.loads(getattr(row, '_' + self.name))
-        if self.type and not isinstance(value, self.type):
+        body = super().load(row)
+        if not body:
+            value = None
+        else:
+            value = pickle.loads(body)
+        if value is not None and self.type and not isinstance(value, self.type):
             raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
         setattr(row, '_' + self.name, value)
 
@@ -379,13 +385,15 @@ class Database:
                     # we should be tightly packed, so next spot is just past the last
                     self._offset = self.table.max('_offset', -1) + 1
                     # index ourselves
+                    for column in cls.columns:
+                        column.load(self)
                     for index in self.table.indices:
                         index.add(self)
                     self._loaded = True
                     # dirty because we're a new row so we aren't on disk yet
                     self._dirty = True
 
-                #delete the row
+                # delete the row
                 def destroy(self):
                     for index in cls.indices:
                         index.remove(self)
@@ -409,7 +417,7 @@ class Database:
                 # these two are so we can use a row as on index key
                 # useful to index foreigncolumns
                 def __eq__(self, other):
-                    return self.id == other.id
+                    return other is not None and self.id == other.id
 
                 def __lt__(self, other):
                     # need to deal with None columns
@@ -436,7 +444,7 @@ class Database:
             cls._dirty_index = cls.find_index('_dirty')
 
             # save our schema for migrations
-            cls.col_dump = pickle.dumps(cls.columns)
+            cls.col_dump = pickle.dumps(cls.columns, 4)
 
         @classmethod
         def load(cls, dir):
