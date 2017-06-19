@@ -140,7 +140,7 @@ Wizard.where(power_level > 7000) #this is efficient!
 
 ```
 
-You can also specify "Virtual columns" that to simplify interfaces.
+You can also specify "Virtual columns" to simplify interfaces.
 
 ```
 class Human(db.Table):
