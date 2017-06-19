@@ -97,7 +97,15 @@ class Column(VColumn):
 
     # called once when a row is about to be written to disk
     # used to bridge from raw byte types to Python data
-    def dump(self):
+    def dump(self, row):
+        pass
+
+    # called once when a table is loaded from disk
+    def load_col(self):
+        pass
+
+    # called once when a table is about to be written to disk
+    def dump_col(self):
         pass
 
     def __getstate__(self):
@@ -222,28 +230,79 @@ class BytesColumn(Column):
         return buffer
 
 
+# A column that stores a byte sequence in an external file
+# This is meant to be abstract parent for classes that require variable length data
+class BlobColumn(Column):
+    def __init__(self, *args, **kwargs):
+        class Struct(LittleEndianStructure):
+            _fields_ = []
+
+        self.Struct = Struct
+        super().__init__(*args, **kwargs)
+
+    def load_col(self):
+        path = self.table.db.path.joinpath(self.table.__name__ + '_' + self.name)
+        os.makedirs(path, exist_ok=True)
+
+    def dump_col(self):
+        self.load_col()
+
+    def store_bytes(self, row, value):
+        path = self.table.db.path.joinpath(self.table.__name__ + '_' + self.name, '{}.dat'.format(row._offset))
+        if value is None:
+            os.remove(path)
+            return
+        file = open(path, 'wb')
+        file.write(value)
+
+    def load(self, row):
+        path = self.table.db.path.joinpath(self.table.__name__ + '_' + self.name, '{}.dat'.format(row._offset))
+        try:
+            file = open(path, 'rb')
+        except IOError:
+            return None
+        return file.read()
+
+
 # A column encoded a unicode string
-class StrColumn(BytesColumn):
+class AbstractStrColumn:
     def set(self, row, value):
-        self.store_bytes(row, value.encode())
+        if value is None:
+            bytes = b''
+        else:
+            bytes = value.encode()
+        self.store_bytes(row, bytes)
         super().set(row, value)
 
     def load(self, row):
         buffer = super().load(row)
-        string = buffer.decode()
+        if buffer is None:
+            string = ''
+        else:
+            string = buffer.decode()
         setattr(row, '_' + self.name, string)
 
 
+class StrColumn(AbstractStrColumn, BytesColumn):
+    pass
+
+
+class StrBlobColumn(AbstractStrColumn, BlobColumn):
+    pass
+
+
 # A column storing a pickled object
-class PickleColumn(BytesColumn):
-    def __init__(self, length=64, type=None):
-        self.type = type
-        super().__init__(length, type)
+class AbstractPickleColumn:
+    type = None
 
     def set(self, row, value):
         if value is not None and self.type and not isinstance(value, self.type):
             raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
-        self.store_bytes(row, pickle.dumps(value, 4))
+        if value is None:
+            bytes = None
+        else:
+            bytes = pickle.dumps(value, 4)
+        self.store_bytes(row, bytes)
         super().set(row, value)
 
     def load(self, row):
@@ -255,6 +314,17 @@ class PickleColumn(BytesColumn):
         if value is not None and self.type and not isinstance(value, self.type):
             raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
         setattr(row, '_' + self.name, value)
+
+
+class PickleColumn(AbstractPickleColumn, BytesColumn):
+    def __init__(self, length=64, type=None):
+        self.type = type
+        super().__init__(length, type)
+
+
+class PickleBlobColumn(AbstractPickleColumn, BlobColumn):
+    def __init__(self, type=None):
+        super().__init__(type)
 
 
 # A Virtual column to access elements through remote columns
@@ -449,6 +519,8 @@ class Database:
         @classmethod
         def load(cls, dir):
             path = dir.joinpath(cls.__name__ + '.tbl')
+            for column in cls.columns:
+                column.load_col()
             try:
                 file = open(path, 'rb')
             except IOError:
@@ -495,6 +567,8 @@ class Database:
             copy.load(path)
             their_columns = set(d.keys())
             their_columns.add('id')
+            for column in cls.columns:
+                column.load_col()
             for row in copy.rows:
                 ours = cls.Row()
                 for column in cls.columns:
@@ -523,8 +597,12 @@ class Database:
             dirty = [i for i in cls._dirty_index.find((True,))]
             # and skip over the header
             header_offset = len(cls.col_dump) + 4
+            for column in cls.columns:
+                column.dump_col()
             for row in dirty:
                 file.seek(row._offset * size + header_offset)
+                for column in cls.columns:
+                    column.dump(row)
                 file.write(row)
                 row._dirty = False
             highest_offset = cls.max('_offset', -1) + 1
@@ -539,6 +617,8 @@ class Database:
             file.write(cls.col_dump)
             ordered = [i for i in cls.find_index('_offset').find(None)]
             for row in ordered:
+                for column in cls.columns:
+                    column.dump(row)
                 file.write(row)
                 row._dirty = False
             cls.full_dump_needed = False
