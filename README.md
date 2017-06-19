@@ -9,7 +9,7 @@ All your data is stored inside a `Database` object.
 ```
 from seaslug import *
 
-db = Datadase()
+db = Database()
 ```
 
 Tables are defined by subclassing `Database.Table`. Columns are specified with `Column` subclasses
