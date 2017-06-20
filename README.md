@@ -64,6 +64,8 @@ class Numbers(db.Table):
 ```
 
 Variable-length columns have a length in bytes. Attempts to excede this length will throw a `ValueError`
+Their data is stored directly in the table, so they are best used for data that in densely populated and about the same length.
+
 ```
 class Tribble(db.Table):
   name = StrColumn(length=8)
@@ -86,6 +88,20 @@ class Tribble(db.Table):
  trib = Tribble.Row()
  trib.name = '名前'
  trib.weight = Decimal('.131')
+ ```
+ 
+ There are also the lobColumns `StrBlobColumn` and `PickleBlobColumn` that store their data in external files. They have no length restriction but impose much more disk access. They are best used for sparse columns or columns of varying length.
+ 
+ ```
+ class Tribble(db.Table):
+  name = StrBlobColumn()
+  weight = PickleBlobColumn()
+  
+ # ...
+ 
+ trib = Tribble.Row()
+ trib.name = '名前' * 10000
+ trib.weight = Decimal('131' * 1000)
  ```
  
  `ForeignColumn` contains a reference to a row in a table. NOte that changing the `id` of a row can break Columns pointing to it.
