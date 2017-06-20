@@ -294,10 +294,11 @@ class StrBlobColumn(AbstractStrColumn, BlobColumn):
 # A column storing a pickled object
 class AbstractPickleColumn:
     type = None
+    default = None
 
     def set(self, row, value):
         if value is not None and self.type and not isinstance(value, self.type):
-            raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
+            raise ValueError("Expected {}, got {}".format(self.type, value.__class__.__name__))
         if value is None:
             bytes = None
         else:
@@ -308,22 +309,28 @@ class AbstractPickleColumn:
     def load(self, row):
         body = super().load(row)
         if not body:
-            value = None
+            if callable(self.default):
+                value = self.default()
+            else:
+                value = self.default
         else:
             value = pickle.loads(body)
         if value is not None and self.type and not isinstance(value, self.type):
-            raise ValueError("Expected {}, got {}", self.type, value.__class__.__name__)
+            raise ValueError("Expected {}, got {}".format(self.type, value.__class__.__name__))
         setattr(row, '_' + self.name, value)
 
 
 class PickleColumn(AbstractPickleColumn, BytesColumn):
-    def __init__(self, length=64, type=None):
+    def __init__(self, length=64, type=None, default=None):
         self.type = type
+        self.default = default
         super().__init__(length, type)
 
 
 class PickleBlobColumn(AbstractPickleColumn, BlobColumn):
-    def __init__(self, type=None):
+    def __init__(self, type=None, default=None):
+        self.type = type
+        self.default = default
         super().__init__(type)
 
 
