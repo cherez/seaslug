@@ -435,6 +435,9 @@ class Database:
                 # True means we've changed and need to be written to disk
                 __dirty = False
 
+                # True means not yet on disk
+                _new = True
+
                 @property
                 def _dirty(self):
                     return self.__dirty
@@ -557,6 +560,7 @@ class Database:
                     index.add(row)
                 # the row just came off the disk, so we know it hasn't been changed
                 row._dirty = False
+                row._new = False
             # and our max id is the highest ID loaded
             cls.max_id = max((i.id for i in cls.rows), default=0)
 
@@ -584,6 +588,7 @@ class Database:
                         setattr(ours, column.name, getattr(row, column.name))
                     # and we need to load all ours
                     column.load(ours)
+                ours._new = False
             # and on save we need to overwrite the schema and save every row
             cls.full_dump_needed = True
 
@@ -612,6 +617,7 @@ class Database:
                     column.dump(row)
                 file.write(row)
                 row._dirty = False
+                row._new = False
             highest_offset = cls.max('_offset', -1) + 1
             # and if the file got shorter, cut off the unneeded bytes
             file.truncate(highest_offset * size + header_offset)
