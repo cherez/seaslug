@@ -655,9 +655,12 @@ class Database:
 
         # query the db
         @classmethod
-        def where(cls, *comparisons):
+        def where(cls, *comparisons, **kwargs):
             eq = [i for i in comparisons if isinstance(i, ColEq)]
             cmp = [i for i in comparisons if not isinstance(i, ColEq)]
+            for key, value in kwargs.items():
+                column = getattr(cls, key)
+                eq.append(column == value)
             eq_names = {i.col.name: i for i in eq}
             cmp_names = {i.col.name: i for i in cmp}
             index = cls.find_index(eq_names, cmp_names)
@@ -704,8 +707,8 @@ class Database:
 
         # simple wrapper for where to return 1 entry or None
         @classmethod
-        def find(cls, *comparisons):
-            for i in cls.where(*comparisons):
+        def find(cls, *comparisons, **kwargs):
+            for i in cls.where(*comparisons, **kwargs):
                 return i
             return None
 
