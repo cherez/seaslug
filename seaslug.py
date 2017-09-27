@@ -9,7 +9,7 @@ from ctypes import LittleEndianStructure, c_uint32, c_ubyte, c_bool
 
 import collections
 from functools import total_ordering
-from skiplistcollections import SkipListDict
+from sortedcontainers import SortedDict
 
 
 # A "virtual" column
@@ -370,11 +370,11 @@ class Index:
     def __init__(self, *keys):
         self.keys = keys
         self.keyer = operator.attrgetter(*keys)
-        self.list = SkipListDict()
+        self.list = SortedDict()
 
     def reindex(self):
         rows = [i for i in self.list.values()]
-        self.list = SkipListDict()
+        self.list = SortedDict()
         for i in rows:
             self.add(i)
 
@@ -387,7 +387,9 @@ class Index:
         del self.list[key]
 
     def find(self, start, reverse=False):
-        return self.list.values(start, reverse)
+        if reverse:
+            return (self.list[i] for i in self.list.irange(maximum=start, reverse=True))
+        return (self.list[i] for i in self.list.irange(start))
 
 
 # Deep breath...
