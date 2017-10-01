@@ -508,6 +508,9 @@ class Database:
                     else:
                         return self.id < other.id
 
+                def __hash__(self):
+                    return hash(cls.__name__ + str(self.id))
+
             # attach properties to the row for easy access
             for column in cls.columns + cls.vcolumns:
                 setattr(Row, column.name, column.Property())
