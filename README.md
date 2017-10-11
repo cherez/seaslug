@@ -47,13 +47,13 @@ No creations, saves, or deletions will be persisted until you save.
 db.save()
 ```
 
-Rows can be deleted witH destroy()
+Rows can be deleted with destroy()
 
 ```
 row.destroy()
 ```
 
-Database migrations are automatic; When you connecrt a database, if the current schema doesn't match the old, data will be imported:
+Database migrations are automatic; When you connect a database, if the current schema doesn't match the old, data will be imported:
 * If a column exists with no column of the same name before, it is initialized as blank.
 * If a column exists with the same name as a previous column, the new value is set to equal the old
 * If a column does not exist when it previously did, it is dropped.
@@ -121,7 +121,7 @@ class Tribble(db.Table):
  
  
  trib = Tribble.Row()
- trib.name = 'Tribbor' # ValueError
+ trib.name = 'Tribbor'
  trib.owner = kirk
  ```
  
@@ -137,7 +137,7 @@ class Tribble(db.Table):
  
  ```
  Tribble.where(name = 'Tribbor') # Generator
- Tribble.find(name = 'Tribbor') # Single row or null
+ Tribble.find(name = 'Tribbor') # Single row or None
  Trible.where(weight < 5) # Generator
  ```
  
@@ -162,7 +162,7 @@ You can also specify "Virtual columns" to simplify interfaces.
 class Human(db.Table):
   name = StrColumn(length=64)
   tribbles = Belongs('Tribble', 'owner') # reverses a ForeignColumn
-  tribble_names = Through('tribbles', 'name') # Lets you specify a 
+  tribble_names = Through('tribbles', 'name') # lets you specify a chain of relations, returning the last column
  
 class Tribble(db.Table):
   name = StrColumn(length=64)
