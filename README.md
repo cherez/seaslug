@@ -90,7 +90,7 @@ class Tribble(db.Table):
  trib.weight = Decimal('.131')
  ```
  
- There are also the lobColumns `StrBlobColumn` and `PickleBlobColumn` that store their data in external files. They have no length restriction but impose much more disk access. They are best used for sparse columns or columns of varying length.
+ There are also the blobColumns `StrBlobColumn` and `PickleBlobColumn` that store their data in external files. They have no length restriction but impose much more disk access. They are best used for sparse columns or columns of varying length.
  
  ```
  class Tribble(db.Table):
