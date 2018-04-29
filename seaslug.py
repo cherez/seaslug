@@ -679,26 +679,28 @@ class Database:
             start = []
             # the tests that should always be true in the chosen range
             # if any fail that means we've moved past any possible matches and can quit
-            matches = []
+            index_matches = []
             for key in index.keys:
                 # if any keyed equalities fail, that means we've moved past
                 if key in eq_names:
                     comp = eq_names[key]
                     start.append(comp.value)
-                    matches.append(comp)
+                    index_matches.append(comp)
                 elif key in cmp_names:
                     # we can only use one comparison key, so we can break after this
                     comp = cmp_names[key]
                     # for a < search, we start from the far left (by not adding to start)
                     # and as soon as we find a key not < the value, that means we've moved past
                     if isinstance(comp, (ColLt, ColLe)):
-                        matches.append(comp)
+                        index_matches.append(comp)
                     else:
                         # for a > search, we start at the minimum value
                         start.append(comp.value)
                     break
                 else:
                     break
+
+            loose_matches = [i for i in eq + cmp if i not in index_matches]
 
             if len(index.keys) == 1:
                 if start:
@@ -710,10 +712,10 @@ class Database:
                 start = tuple(start)
             for entry in index.find(start):
                 # these will always be true until we exit the range where a match is possible
-                if not all(i.match(entry) for i in matches):
+                if not all(i.match(entry) for i in index_matches):
                     break
                 # and here we verify the entry matches every test
-                if all(i.match(entry) for i in comparisons):
+                if all(i.match(entry) for i in loose_matches):
                     yield entry
 
         # simple wrapper for where to return 1 entry or None
